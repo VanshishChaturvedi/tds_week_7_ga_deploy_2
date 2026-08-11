@@ -3,64 +3,6 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# ==========================================
-# ENDPOINT 1: CI/CD Container Release Gate
-# ==========================================
-@app.route('/release-gate', methods=['POST'], strict_slashes=False)
-def release_gate():
-    try:
-        data = request.get_json(force=True, silent=True)
-        if not isinstance(data, dict): data = {}
-    except Exception:
-        data = {}
-        
-    violations = set()
-    target, event, ref = data.get('target'), data.get('event'), data.get('ref')
-    
-    workflow = data.get('workflow')
-    if not isinstance(workflow, dict): workflow = {}
-        
-    image = data.get('image')
-    if not isinstance(image, dict): image = {}
-        
-    expected_perms = {"contents": "read", "packages": "write", "id-token": "none"}
-    if workflow.get('permissions') != expected_perms: violations.add("EXCESS_PERMISSION")
-    if event == 'pull_request' and workflow.get('trigger') != 'pull_request': violations.add("UNSAFE_PR_TRIGGER")
-    if not (workflow.get('testsPassed') is True and workflow.get('matrixComplete') is True and workflow.get('failFast') is False): violations.add("TESTS_INCOMPLETE")
-        
-    actions = workflow.get('actions')
-    if actions is None: actions = []
-    if isinstance(actions, list):
-        for action in actions:
-            if isinstance(action, dict):
-                if action.get('owner') != 'actions':
-                    ref_val = action.get('ref', '')
-                    if not isinstance(ref_val, str) or not re.match(r'^[a-f0-9]{40}$', ref_val): violations.add("MUTABLE_ACTION")
-            else:
-                violations.add("MUTABLE_ACTION")
-                
-    if image.get('multiStage') is not True: violations.add("SINGLE_STAGE_IMAGE")
-    if image.get('runsAsRoot') is not False: violations.add("ROOT_RUNTIME")
-    if image.get('secretMode') not in ['none', 'buildkit']: violations.add("SECRET_IN_LAYER")
-    try:
-        if float(image.get('criticalVulnerabilities', 1)) > 0: violations.add("CRITICAL_CVE")
-    except (TypeError, ValueError):
-        violations.add("CRITICAL_CVE")
-    if image.get('digestPinned') is not True: violations.add("UNPINNED_IMAGE")
-        
-    if target == 'production':
-        if event != 'push' or ref != 'refs/heads/main': violations.add("INVALID_PRODUCTION_REF")
-        if workflow.get('environmentApproval') is not True: violations.add("APPROVAL_REQUIRED")
-            
-    violations_list = list(violations)
-    return jsonify({
-        "decision": "promote" if not violations_list else "block",
-        "violations": violations_list
-    })
-
-# ==========================================
-# ENDPOINT 2: LLM Action Firewall
-# ==========================================
 @app.route('/action-firewall', methods=['POST'], strict_slashes=False)
 def action_firewall():
     # 1. Endpoint Availability / Safe JSON Parsing
@@ -76,9 +18,9 @@ def action_firewall():
         return jsonify(decision="block", reason="INVALID_SCHEMA")
         
     action = data['action']
-    if 'tool' not in action or not isinstance(action['tool'], str):
+    if 'tool' not in action or not isinstance(action.get('tool'), str):
         return jsonify(decision="block", reason="INVALID_SCHEMA")
-    if 'args' not in action or not isinstance(action['args'], dict):
+    if 'args' not in action or not isinstance(action.get('args'), dict):
         return jsonify(decision="block", reason="INVALID_SCHEMA")
         
     tool = action['tool']
@@ -128,7 +70,7 @@ def action_firewall():
         if set(args.keys()) != {'html'} or not isinstance(args['html'], str):
             return jsonify(decision="block", reason="INVALID_SCHEMA")
             
-        # HTML Safety Verification
+        # HTML Safety Verification (Block scripts, iframes, inline events, javascript: URLs)
         html = args['html'].lower()
         if '<script' in html or '<iframe' in html or 'javascript:' in html or re.search(r'\bon[a-z]+\s*=', html):
             return jsonify(decision="block", reason="UNSAFE_OUTPUT")
